@@ -43,7 +43,6 @@ Before running the application, ensure you have the following set up:
    .venv\Scripts\activate # Activate the environment (Windows)
    pip install -r requirements.txt
 
-
 3. **Cloud SQL (Recommended for Production):** Create a Cloud SQL PostgreSQL instance in the Google Cloud Console. Crucially, 	configure Private IP connectivity. You'll use the Cloud SQL Auth Proxy for secure access.
 4. **Cloud SQL Auth Proxy (Required for Cloud SQL):**
 Download and Install: Download and install the Cloud SQL Auth Proxy from the Google Cloud website. Choose the appropriate 	package for your operating system.
