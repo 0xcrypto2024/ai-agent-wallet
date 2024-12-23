@@ -12,6 +12,8 @@ from datetime import timedelta
 from eth_account import Account
 import psycopg2  # Or your preferred database library
 from dotenv import load_dotenv
+from web3 import Web3
+
 
 load_dotenv()
 DATABASE_URL = os.environ.get("DATABASE_URL")  # Now get the value!
@@ -19,6 +21,9 @@ print(f"DATABASE_URL: {DATABASE_URL}")
 
 MIGRATIONS_DIR = os.path.join(os.path.dirname(__file__), "migrations/versions")
 
+# --- Configure Web3 ---
+WEB3_PROVIDER_URI = os.environ.get("WEB3_PROVIDER_URI") # Example: "http://127.0.0.1:8545/"  (Ganache, for example)
+w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER_URI))  # Initialize Web3
 
 app = Flask(__name__)
 
@@ -45,7 +50,6 @@ def parse_timedelta(time_str):
 
 def apply_migrations(cursor):
     """Applies database migrations."""
-
     try:
         # Check if applied_migrations table exists, create if not
         cursor.execute("""
@@ -66,27 +70,14 @@ def apply_migrations(cursor):
         raise
 
     migration_files = sorted([f for f in os.listdir(MIGRATIONS_DIR) if f.endswith(".sql")])
-
-
-
-
     for migration_file in migration_files:
-
-
         # Extract migration version from filename (e.g. 001, 002, etc.)
         try:
-
             version = int(migration_file.split("_")[0])
-
         except (ValueError, IndexError):
             print(f"Skipping invalid migration file: {migration_file}")
             continue  # skip if cannot extract version
-
-
-
         if version > current_version:
-
-
             try:
                 migration_path = os.path.join(MIGRATIONS_DIR, migration_file)
                 with open(migration_path, "r") as f:
@@ -95,9 +86,6 @@ def apply_migrations(cursor):
                     cursor.execute(sql)
                     # Record successful migration
                     cursor.execute("INSERT INTO applied_migrations (version, migration_name) VALUES (%s, %s)", (version, migration_file))
-
-
-
             except psycopg2.Error as e:
                 print(f"Error applying migration {migration_file}: {e}")
                 raise
@@ -120,9 +108,63 @@ def get_db():
         with g.db.cursor() as cursor:
             apply_migrations(cursor) # Apply migrations when establishing the connection
             g.db.commit()
-
-
     return g.db
+
+# Example of decryption (adapt to your needs):
+def decrypt_private_key(encrypted_key_with_salt, user_password):
+    try:
+
+        encrypted_private_key, salt_hex  = encrypted_key_with_salt.split(":",1)
+        salt = bytes.fromhex(salt_hex)
+        kdf = PBKDF2HMAC( # Same setting as encryption
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+        )
+        fernet_key = base64.urlsafe_b64encode(kdf.derive(user_password.encode()))
+        f = Fernet(fernet_key)
+        private_key_bytes = f.decrypt(encrypted_private_key.encode())
+        private_key = private_key_bytes.decode()
+
+        return private_key
+    except Exception as e:
+        print("failed to decrypt private key: {e}")
+        return None
+
+# --- Helper Function to Get Private Key (adapt as needed, or integrate with your load_wallet function)
+def get_private_key(username, password, mfa_code, address):
+
+    db = get_db()
+    cursor = db.cursor()
+    try:
+        print(f"Querying for username: {username}, address: {address}") 
+        cursor.execute("""SELECT encrypted_private_key, w.salt, mfa_secret
+                          FROM wallets w JOIN users u ON w.user_id = u.user_id
+                          WHERE u.username = %s AND w.address = %s;""", (username, address))
+        
+        result = cursor.fetchone()
+        print(f"Result from database: {result}")  # What did the query return?
+        if not result:
+            return None  # Wallet not found or user does not own wallet with given address.
+
+        encrypted_private_key, salt, mfa_secret = result
+        print(f"Encrypted Key: {encrypted_private_key}, Salt: {salt}, MFA Secret: {mfa_secret}") 
+        totp = pyotp.TOTP(mfa_secret)
+        if not totp.verify(mfa_code):  # Verify MFA
+            return None
+
+        encrypted_private_key_with_salt = f"{encrypted_private_key}:{salt}" # Recreate the salt:key combination for decryption
+        private_key = decrypt_private_key(encrypted_private_key_with_salt, password)  # Decrypt
+        print(f"Decrypted Private Key: {private_key}")  # Print after decryption
+        return private_key
+
+    except Exception as e:
+        print(f"Error in get_private_key: {e}")
+        return None
+
+    finally:
+        cursor.close()
 
 
 @app.teardown_appcontext
@@ -137,8 +179,6 @@ expires_str = os.environ.get("JWT_ACCESS_TOKEN_EXPIRES", "30m") # Default is 30 
 
 try:
     app.config["JWT_ACCESS_TOKEN_EXPIRES"] = parse_timedelta(expires_str)
-
-
 except ValueError as e:
     print(f"Error parsing JWT expiration time: {e}")
     # Handle the error appropriately (e.g., exit, use a default value)
@@ -155,7 +195,6 @@ jwt = JWTManager(app)
 def register():
     username = request.json.get('username')
     password = request.json.get('password')
-
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
 
@@ -163,21 +202,16 @@ def register():
     cursor = db.cursor()
 
     try:
-
         # 1. Check if username already exists.  Important for uniqueness
         cursor.execute("SELECT 1 FROM users WHERE username = %s", (username,))
         if cursor.fetchone():  # If a row is returned, the username exists
             return jsonify({"error": "Username already exists"}), 400
-
         # 2. Hash the password  Don't store passwords in plain text!
         salt = secrets.token_hex(16) # generate a salt.
         hashed_password = hash_password(password, salt)
-
-
         # 3. Insert the new user into the database  Use parameterized query to prevent SQL injection.
         cursor.execute("INSERT INTO users (username, password_hash, salt) VALUES (%s, %s, %s) RETURNING user_id", (username, hashed_password, salt))
         db.commit()
-
         return jsonify({"message": "User registered successfully"}), 201
 
     except Exception as e:
@@ -330,29 +364,213 @@ def setup_mfa():
     finally:
         cursor.close()
 
-# Example of decryption (adapt to your needs):
-def decrypt_private_key(encrypted_key_with_salt, user_password):
+
+@app.route('/api/load_wallet', methods=['POST'])
+@jwt_required()
+def load_wallet():
+
+    username = get_jwt_identity()
+    user_password = request.json.get('password')
+    mfa_code = request.json.get('mfa_code')  # Get the MFA code from the request
+
+    if not user_password or not mfa_code: # require both
+        return jsonify({"error": "Password and MFA code are required"}), 400
+    
+    address = request.json.get('address')
+    if not address:
+       return jsonify({"error": "address is required"}), 400
+
+    db = get_db()
+    cursor = db.cursor()
+
     try:
-
-        encrypted_private_key, salt_hex  = encrypted_key_with_salt.split(":",1)
-        salt = bytes.fromhex(salt_hex)
-        kdf = PBKDF2HMAC( # Same setting as encryption
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=100000,
+        # Retrieve wallet and MFA information
+        cursor.execute(
+            "SELECT encrypted_private_key, w.salt, mfa_secret FROM wallets w JOIN users u ON w.user_id = u.user_id WHERE u.username = %s AND w.address = %s", # Address needed here.
+            (username,address), # Address parameter was missing.
         )
-        fernet_key = base64.urlsafe_b64encode(kdf.derive(user_password.encode()))
-        f = Fernet(fernet_key)
-        private_key_bytes = f.decrypt(encrypted_private_key.encode())
-        private_key = private_key_bytes.decode()
+        wallet_data = cursor.fetchone()
 
-        return private_key
+        if not wallet_data:
+            return jsonify({"error": "Wallet not found for this user"}), 404
 
+        encrypted_private_key, salt_hex, mfa_secret = wallet_data  # Retrieve mfa_secret
+
+        # --- MFA Verification ---
+        totp = pyotp.TOTP(mfa_secret)
+        if not totp.verify(mfa_code):
+            return jsonify({"error": "Invalid MFA code"}), 401  # Unauthorized
+
+        # --- Decrypt only after successful MFA verification ---
+        encrypted_private_key_with_salt = f"{encrypted_private_key}:{salt_hex}" # recreate this.
+        private_key = decrypt_private_key(encrypted_private_key_with_salt, user_password)
+
+        if private_key:
+            account = Account.from_key(bytes.fromhex(private_key))
+            return jsonify({"address": account.address}), 200
+        else:
+            return jsonify({"error": "Incorrect password or decryption failed"}), 401
 
 
     except Exception as e:
-        return None
+        print(f"Error loading wallet: {e}")  # Print exception to server logs.
+        return jsonify({"error": "Failed to load wallet"}), 500
+
+    finally:
+        cursor.close()
+
+# --- Native Token Transfer ---
+@app.route('/api/transfer', methods=['POST'])
+@jwt_required()
+def transfer():
+    username = get_jwt_identity()
+    password = request.json.get('password')
+    mfa_code = request.json.get('mfa_code')
+    to_address = request.json.get('to_address')
+    amount = request.json.get('amount')  # Amount in wei (smallest unit of ether)
+    wallet_address = request.json.get('address') # The user's wallet address.
+
+    if not all([password, mfa_code, to_address, amount, wallet_address]):  # Essential validation!
+        return jsonify({"error": "Missing required parameters"}), 400
+
+
+    try:
+        amount = int(amount) # should be int or decimal, for example wei.
+    except ValueError as e:
+        print(f"Cannot convert {amount=} to number")
+        return jsonify({"error": "Amount must be a valid number"}), 400
+
+    # Get user's private key. Handle None if retrieval fails.
+    private_key = get_private_key(username, password, mfa_code, wallet_address)
+
+    if private_key is None: # Handle case where private key could not be retrieved
+        return jsonify({"error": "Failed to access wallet"}), 401  # Unauthorized
+
+
+    try:
+        account = Account.from_key(bytes.fromhex(private_key)) #  Use private key to set up account
+        nonce = w3.eth.get_transaction_count(account.address)
+        # Build the transaction
+        tx = {
+            'nonce': nonce,
+            'to': to_address,
+            'value': amount,
+            'gas': 21000,  # Adjust gas as needed
+            'gasPrice': w3.eth.gas_price, # Fetch current gas price from provider.
+            'chainId': w3.eth.chain_id
+        }
+
+        # Sign the transaction
+        signed_tx = w3.eth.account.sign_transaction(tx, private_key)
+
+        # Send the transaction
+        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+
+
+        return jsonify({"tx_hash": tx_hash.hex()}), 201 # Return transaction hash
+
+    except Exception as e:  # Handle web3 or other exceptions properly
+        print(f"Error sending transaction: {e}")  # Log details for debugging
+        return jsonify({"error": "Failed to send transaction"}), 500  # Generic message to the client
+
+
+
+# --- Smart Contract Interaction (Example) ---
+@app.route('/api/contract_call', methods=['POST'])
+@jwt_required()
+def contract_call():
+    username = get_jwt_identity()
+    password = request.json.get('password')
+    mfa_code = request.json.get('mfa_code')
+
+    contract_address = request.json.get('contract_address')
+    contract_abi = request.json.get('contract_abi')
+    function_name = request.json.get('function_name')
+    function_args = request.json.get('function_args', [])  # Allow empty args
+    wallet_address = request.json.get('address') #  Address from which to send the tx.
+
+    # Essential validation
+    if not all([password, mfa_code, contract_address, contract_abi, function_name, wallet_address]):
+        return jsonify({"error": "Missing required parameters"}), 400
+
+    # Private key retrieval (handle MFA, decryption, errors)
+    private_key = get_private_key(username, password, mfa_code, wallet_address)
+    if private_key is None:
+        return jsonify({"error": "Failed to access wallet"}), 401
+
+    try:
+
+        account = Account.from_key(bytes.fromhex(private_key))
+        # Set up the contract object
+        contract = w3.eth.contract(address=contract_address, abi=contract_abi)
+
+
+        # Get the contract function
+        contract_function = contract.functions[function_name](*function_args) # use the function arguments
+
+        # Build, sign and send transaction
+
+        tx = contract_function.buildTransaction({'from':account.address,'nonce':w3.eth.getTransactionCount(account.address)}) # Get nonce
+        signed_txn = w3.eth.account.signTransaction(tx,private_key=private_key)  # Sign the transaction
+        tx_hash = w3.eth.sendRawTransaction(signed_txn.rawTransaction)
+
+
+        return jsonify({"tx_hash": tx_hash.hex()}), 201
+
+    except Exception as e:  # Catch web3 or contract-related exceptions
+        print(f"Error interacting with contract: {e}") # Important: Log the detailed error!
+        return jsonify({"error": "Failed to interact with contract"}), 500
+
+
+# --- ERC20 Token Transfer ---
+@app.route('/api/transfer_erc20', methods=['POST'])
+@jwt_required()
+def transfer_erc20():
+
+    username = get_jwt_identity()
+    password = request.json.get('password')
+    mfa_code = request.json.get('mfa_code')
+    token_address = request.json.get('token_address')
+    to_address = request.json.get('to_address')
+    amount = request.json.get('amount')
+    wallet_address = request.json.get('address') # Wallet making the transfer
+
+    if not all([password, mfa_code, token_address, to_address, amount, wallet_address]):
+        return jsonify({"error": "Missing parameters"}), 400
+
+    private_key = get_private_key(username, password, mfa_code, wallet_address)  # Private key and mfa verification
+    if private_key is None:
+        return jsonify({"error": "Failed to load wallet"}), 401
+
+    try:
+        account = Account.from_key(bytes.fromhex(private_key))
+        # --- Standard ERC20 ABI (you can make this a constant) ---
+        erc20_abi = [
+            {"constant": False,"inputs": [{"name": "_to","type": "address"},{"name": "_value","type": "uint256"}],"name": "transfer","outputs": [{"name": "","type": "bool"}],"payable": False,"stateMutability": "nonpayable","type": "function"} # transfer function
+        ]
+        contract = w3.eth.contract(address=token_address, abi=erc20_abi)
+        transfer_fn = contract.functions.transfer(to_address, amount) # set up the transfer function here with params
+
+         # Build the transaction
+        transaction = transfer_fn.buildTransaction({
+            'from': account.address,
+            'gas': 70000,  # Adjust gas as needed (get gas estimate for better accuracy)
+            'gasPrice': w3.eth.gas_price,
+            'nonce': w3.eth.getTransactionCount(account.address)
+        })
+
+        # Sign the transaction
+        signed_tx = w3.eth.account.signTransaction(transaction, private_key)
+
+        # Send transaction
+        tx_hash = w3.eth.sendRawTransaction(signed_tx.rawTransaction)
+        return jsonify({"tx_hash": tx_hash.hex()}), 201
+
+
+    except Exception as e:
+        print(f"ERC20 transfer error: {e}")
+        return jsonify({"error": "Failed to send ERC20 token"}), 500
+
 
 
 if __name__ == "__main__":

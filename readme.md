@@ -29,6 +29,47 @@ Frontend applications interact with the backend API using standard HTTP requests
 |  *(Other wallet operations endpoints)* |  GET/POST etc.  | e.g., get balance, send transaction, etc. | JWT, potentially MFA |
 
 
+## Prerequisites
+
+Before running the application, ensure you have the following set up:
+
+1. **Python 3.9 (or compatible):** This project is developed using Python 3.9. You can check your Python version with `python3 --version`.
+
+2. **Virtual Environment (Recommended):** It's highly recommended to use a virtual environment to isolate project dependencies.
+
+   ```bash
+   python3 -m venv .venv  # Create a virtual environment
+   source .venv/bin/activate  # Activate the environment (macOS/Linux)
+   .venv\Scripts\activate # Activate the environment (Windows)
+   pip install -r requirements.txt
+
+
+3. **Cloud SQL (Recommended for Production):** Create a Cloud SQL PostgreSQL instance in the Google Cloud Console. Crucially, 	configure Private IP connectivity. You'll use the Cloud SQL Auth Proxy for secure access.
+4. **Cloud SQL Auth Proxy (Required for Cloud SQL):**
+Download and Install: Download and install the Cloud SQL Auth Proxy from the Google Cloud website. Choose the appropriate 	package for your operating system.
+​Authentication: Authenticate with Google Cloud. The easiest way is using the gcloud command-line tool. If you haven't already, 	install the Google Cloud SDK and run gcloud auth login. If the proxy is having issues connecting, and you have already authorized your local machine's IP address to connect to the instance, try running gcloud auth application-default login which sometimes resolves obscure authentication issues. This generates credentials in a slightly different way.
+Start the Proxy: Run the proxy. If using tcp:0 ensure that you are also using the selected port in your .env file DATABASE_URL.
+```bash 
+cloud_sql_proxy -instances=<PROJECT-ID>:<REGION>:<INSTANCE-NAME>=tcp:<PORT> &
+```
+Replace <PROJECT_ID>:<REGION>:<INSTANCE_NAME> with your Cloud SQL instance connection name. This value can be found in the Cloud SQL instances page in the Google Cloud Console.
+If connecting directly with psql you will usually want to use port 5432:
+```bash cloud_sql_proxy -instances=<PROJECT-ID>:<REGION>:<INSTANCE_NAME>=tcp:5432 &
+If connecting through your python application it is often easier to let the proxy choose a port for you in case something is already running on port 5432:
+cloud_sql_proxy -instances=<PROJECT-ID>:<REGION>:<INSTANCE_NAME>=tcp:0 &
+```
+The proxy will select a random available port. You must use this port when setting up your DATABASE_URL environment variable, as described below. The proxy will output the selected port, for example:
+
+Listening on 127.0.0.1:44915 for <YOUR_INSTANCE_CONNECTION_NAME>
+Proxy initialized in 796.66411ms
+
+5. Environment Variables (.env file):
+
+#... other env variables
+DATABASE_URL="postgresql://<username>:<password>@127.0.0.1:<PORT>/<database_name>?sslmode=disable"
+Replace <username>, <password>, and <database_name> with your Cloud SQL database credentials. Replace <PORT> with 5432 or the port printed by the proxy if you are using the tcp:0 argument with the proxy.
+
+
 
 ## Database Migrations
 Database schema migrations are managed using SQL scripts located in the `migrations/versions` directory.  The `apply_migrations` function in the backend code automatically applies new migrations upon application startup. Each migration file is versioned numerically, allowing only new schema changes to be applied.
