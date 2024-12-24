@@ -1,99 +1,114 @@
-# Secure Headless Wallet Framework
+# Secure AI Agent Wallet with Human MFA Confirmation
 
-This framework provides a secure, headless wallet solution designed for integration with frontend applications. It prioritizes security by handling sensitive operations on the backend and leveraging API keys, JWT (JSON Web Tokens), and MFA (Multi-Factor Authentication).
+This project provides a secure, headless wallet framework designed for AI agents with a crucial human oversight feature: Multi-Factor Authentication (MFA) confirmation for all transactions. This ensures that no transaction is executed without explicit approval from a human user.
 
 ## Architecture
 
-The framework employs a backend service (e.g., Flask) that manages wallet creation, balance retrieval, transaction processing, and other sensitive actions. Frontend applications (e.g., React) interact with this backend through secure API calls.
+The system comprises a backend (Flask) and a frontend (e.g., React) that interact through a secure API.  AI agents use API keys for authentication, while users utilize JWTs (JSON Web Tokens) and MFA for authorization and transaction confirmation. Private keys are managed and encrypted solely on the backend.
 
 ## Security Features
 
-* **API Keys:** Used for initial authentication and identification of the frontend application.
-* **JWT (JSON Web Tokens):**  Provides secure authentication and authorization for individual users. JWTs are issued upon successful login and used for subsequent API calls.
-* **MFA (Multi-Factor Authentication):** Adds an extra layer of security for critical operations like transaction signing.  This implementation uses TOTP (Time-based One-Time Passwords), compatible with Google Authenticator and similar apps.
-* **Backend Key Management:** Private keys are handled exclusively on the backend, never exposed to the frontend.  Encryption at rest is employed, and more advanced solutions like hardware security modules (HSMs) or multi-party computation (MPC) can be integrated for enhanced security.
+* **API Key Authentication (for AI Agents):** Each AI agent is assigned a unique API key for authentication and authorization.
+* **JWT (JSON Web Tokens) (for Users):**  Users authenticate with username/password and are issued JWTs for secure access to the API.
+* **MFA (Multi-Factor Authentication):** Users are required to set up MFA using TOTP (Time-based One-Time Passwords), adding a layer of security for transaction authorization. MFA secrets are encrypted at rest.
+* **Backend Key Management:** Private keys are never exposed to the frontend. They are encrypted at rest using Fernet, with PBKDF2HMAC for key derivation.  Future enhancements may include HSMs or MPC for stronger security.
+* **Transaction Authorization Flow:** AI agents prepare transactions, but users must explicitly authorize them via MFA before execution.  This prevents unauthorized agent activity.
 
 ## Frontend Integration
 
-Frontend applications interact with the backend API using standard HTTP requests.  API keys and JWTs are included in request headers for authentication and authorization.  The framework is designed to be compatible with various frontend technologies, such as React.
+Frontend applications interact with the backend API using standard HTTP requests, including API keys (for agents) or JWTs (for users) in the `Authorization` header.
 
 ## API Endpoints
 
+| Endpoint                 | Method | Description                                                       | Authentication                                       |
+|--------------------------|--------|-------------------------------------------------------------------|----------------------------------------------------|
+| `/api/register`          | POST   | Registers a new user.                                             | None                                               |
+| `/api/login`             | POST   | User login; returns a JWT.                                        | None                                               |
+| `/api/create_wallet`      | POST   | Creates a new wallet for the authenticated user.                 | JWT, User Password                                |
+| `/api/load_wallet`       | POST   | Loads a user's wallet (agent or user).                       | JWT, Password, MFA Code, Wallet Address (if User)  |   
+| `/api/setup_mfa`         | POST   | Sets up/overwrites MFA.                                           | JWT                                             |
+| `/api/prepare_transaction` | POST   | Agent prepares a transaction (requires authorization).            | API Key, User ID                               |
+| `/api/authorize_transaction` | POST | User authorizes a pending transaction with MFA.                   | JWT, MFA Code, Transaction ID                   |
+| `/api/transaction_status` | GET    | Agent retrieves a pending transaction's status.                   | API Key, Transaction ID                          |
+| `/api/execute_transaction` | POST   | Agent executes an authorized transaction.                        | API Key, Transaction ID                          |
+| `/api/transfer`          | POST   | User-initiated native token transfer.                             | JWT, Password, MFA Code, To Address, Amount, Wallet Address |
+| `/api/transfer_erc20`     | POST   | User-initiated ERC20 token transfer.                              | JWT, Password, MFA Code, Token Address, To Address, Amount, Wallet Address |
+| `/api/contract_call`     | POST   | User-initiated smart contract interaction.                         | JWT, Password, MFA Code, Contract Details, Wallet Address |
 
-| Endpoint          | Method | Description                                           | Authentication        |
-|-------------------|--------|-------------------------------------------------------|-----------------------|
-| `/api/register`   | POST   | Registers a new user.                               | None                  |
-| `/api/login`      | POST   | Logs in a user and returns a JWT.                    | None                  |
-| `/api/create_wallet` | POST   | Creates a new wallet for the authenticated user.     | JWT, User Password    |
-| `/api/setup_mfa`  | POST   | Sets up or overwrites MFA for the authenticated user. | JWT                   |
-|  *(Other wallet operations endpoints)* |  GET/POST etc.  | e.g., get balance, send transaction, etc. | JWT, potentially MFA |
 
+## User Flow
+
+1. **Registration & Wallet Creation:** User registers (`/api/register`), creates a wallet (`/api/create_wallet`), and sets up MFA (`/api/setup_mfa`).
+
+2. **Agent Wallet Loading & Transaction Preparation:**  Agent authenticates (using API Key), loads the wallet (`/api/load_wallet`), and prepares a transaction (`/api/prepare_transaction`).
+
+3. **User Authorization:** User receives a notification, reviews the transaction, and authorizes it with MFA (`/api/authorize_transaction`).
+
+4. **Agent Transaction Execution:** Agent polls (`/api/transaction_status`) or receives a notification (WebSockets), then executes the authorized transaction (`/api/execute_transaction`).
+
+
+## Transaction Flow Diagram
+
+```mermaid sequenceDiagram
+    participant Agent    participant Backend    participant Database    participant User    participant Blockchain     Agent->>+Backend: prepare_transaction (API Key, tx details, username)    Backend->>+Database: Store pending transaction (tx_id, details, etc.)    Database-->>-Backend: transaction_id (UUID)    Backend-->>-Agent: transaction_id (202 Accepted)     Backend->>User: Notification (tx details, transaction_id)     User->>+Backend: authorize_transaction (JWT, MFA code, transaction_id)    Backend->>+Database: Verify MFA & update tx status to 'authorized'    Database-->>-Backend: Success/Failure    Backend-->>-User: Authorization result (200 OK/Error)     Agent->>+Backend: transaction_status (API Key, transaction_id)    Backend->>+Database: Retrieve transaction status    Database-->>-Backend: Transaction Status (authorized/pending/rejected)    Backend-->>-Agent: Transaction Status     Agent->>+Backend: execute_transaction (API Key, transaction_id)    Backend->>+Database: Retrieve authorized transaction details    Database-->>-Backend: Transaction details    Backend->>+Blockchain: Execute transaction    Blockchain-->>-Backend: tx_hash    Backend-->>-Agent: tx_hash (201 Created) 
+```
 
 ## Prerequisites
 
-Before running the application, ensure you have the following set up:
+1.  **Python 3.9+:** Check with `python3 --version`.
+2.  **Virtual Environment:**
+    ```bash
+    python3 -m venv .venv
+    source .venv/bin/activate  # macOS/Linux
+    .venv\Scripts\activate     # Windows
+    ```
+3.  **Dependencies:** `pip install -r requirements.txt`
+4.  **PostgreSQL:** Install locally and create a database and user, or use Cloud SQL (recommended for production).
+5.  **Cloud SQL Auth Proxy (If using Cloud SQL):** Install, authenticate (`gcloud auth login` or `gcloud auth application-default login`), and start: `cloud_sql_proxy -instances=<YOUR_INSTANCE_CONNECTION_NAME>=tcp:5432 &` (or `tcp:0` and update `.env`).
+6.  **Environment Variables:** Create a `.env` file (see `.env.example`):
+    ```
+    GOOGLE_API_KEY="..."    
+    API_SECRET="..."       
+    JWT_SECRET_KEY="..."   
+    JWT_ACCESS_TOKEN_EXPIRES=...
+    DATABASE_URL="..."
+    WEB3_PROVIDER_URI="..." # Your web3 provider, for example infura, alchemy or ganache, for testing.     
+    ```
+    * **`DATABASE_URL` examples:**
+       * Local: `postgresql://user:password@host:port/database`
+       * Cloud SQL (proxy): `postgresql://user:password@127.0.0.1:<PORT>/database?sslmode=disable` (Replace placeholders. `<PORT>` is `5432` unless using `tcp:0`, then it's the proxy-assigned port).
 
-1. **Python 3.9 (or compatible):** This project is developed using Python 3.9. You can check your Python version with `python3 --version`.
 
-2. **Virtual Environment (Recommended):** It's highly recommended to use a virtual environment to isolate project dependencies.
-
-   ```bash
-   python3 -m venv .venv  # Create a virtual environment
-   source .venv/bin/activate  # Activate the environment (macOS/Linux)
-   .venv\Scripts\activate # Activate the environment (Windows)
-   pip install -r requirements.txt
-
-
-3. **Cloud SQL (Recommended for Production):** Create a Cloud SQL PostgreSQL instance in the Google Cloud Console. Crucially, 	configure Private IP connectivity. You'll use the Cloud SQL Auth Proxy for secure access.
-4. **Cloud SQL Auth Proxy (Required for Cloud SQL):**
-Download and Install: Download and install the Cloud SQL Auth Proxy from the Google Cloud website. Choose the appropriate 	package for your operating system.
-​Authentication: Authenticate with Google Cloud. The easiest way is using the gcloud command-line tool. If you haven't already, 	install the Google Cloud SDK and run gcloud auth login. If the proxy is having issues connecting, and you have already authorized your local machine's IP address to connect to the instance, try running gcloud auth application-default login which sometimes resolves obscure authentication issues. This generates credentials in a slightly different way.
-Start the Proxy: Run the proxy. If using tcp:0 ensure that you are also using the selected port in your .env file DATABASE_URL.
-```bash 
-cloud_sql_proxy -instances=<PROJECT-ID>:<REGION>:<INSTANCE-NAME>=tcp:<PORT> &
-```
-Replace <PROJECT_ID>:<REGION>:<INSTANCE_NAME> with your Cloud SQL instance connection name. This value can be found in the Cloud SQL instances page in the Google Cloud Console.
-If connecting directly with psql you will usually want to use port 5432:
-```bash cloud_sql_proxy -instances=<PROJECT-ID>:<REGION>:<INSTANCE_NAME>=tcp:5432 &
-If connecting through your python application it is often easier to let the proxy choose a port for you in case something is already running on port 5432:
-cloud_sql_proxy -instances=<PROJECT-ID>:<REGION>:<INSTANCE_NAME>=tcp:0 &
-```
-The proxy will select a random available port. You must use this port when setting up your DATABASE_URL environment variable, as described below. The proxy will output the selected port, for example:
-
-Listening on 127.0.0.1:44915 for <YOUR_INSTANCE_CONNECTION_NAME>
-Proxy initialized in 796.66411ms
-
-5. Environment Variables (.env file):
-
-#... other env variables
-DATABASE_URL="postgresql://<username>:<password>@127.0.0.1:<PORT>/<database_name>?sslmode=disable"
-Replace <username>, <password>, and <database_name> with your Cloud SQL database credentials. Replace <PORT> with 5432 or the port printed by the proxy if you are using the tcp:0 argument with the proxy.
+7.  **Database Migrations:**
+    * Create the `migrations/versions` directory.
+    * Add SQL migration scripts (e.g., `001_create_users.sql`, `002_create_wallets.sql`, `003_add_mfa_secret_to_users.sql`). Down migrations (for rollback) are not implemented but recommended.
+    * Run: `python app.py` (migrations applied on startup).
+    * Create a test user (psql or implement `/api/register`) and log in to get a JWT for testing other endpoints.
+    * Create an API key for your AI agent. This can be stored in the database, for example in a table called `api_keys`.  Store the API keys securely, and consider hashing or encrypting.  You will also need to implement logic for validating API keys when the agent makes a request. The request headers should include `X-API-KEY` and the key itself.  You can use this key to authenticate the agent.
 
 
 
 ## Database Migrations
-Database schema migrations are managed using SQL scripts located in the `migrations/versions` directory.  The `apply_migrations` function in the backend code automatically applies new migrations upon application startup. Each migration file is versioned numerically, allowing only new schema changes to be applied.
 
-
+Schema changes are managed with versioned scripts in `migrations/versions`.  `apply_migrations` applies new migrations on startup.
 
 ## Development and Deployment
 
-* **Local Development:** For local development, PostgreSQL is used.  The Cloud SQL Auth proxy is used for secure connections to Cloud SQL instances during development.
-* **Production:**  Cloud SQL (PostgreSQL) is recommended for production due to its security features, scalability, and managed services.
-
-
+* **Local Development:**  PostgreSQL and optionally Cloud SQL Auth proxy if using Cloud SQL.
+* **Production:** Cloud SQL (PostgreSQL) is recommended.
 
 ## Security Best Practices
 
-* **HTTPS:**  Always use HTTPS in production to secure communication between the frontend and backend.
-* **Input Validation:** Validate all user inputs thoroughly to prevent vulnerabilities.
-* **Secure Coding Practices:** Follow secure coding guidelines to minimize vulnerabilities.
-* **Regular Security Audits:**  Perform regular security audits and penetration testing.
+* **HTTPS (Production):** Essential.
+* **Input Validation:** Validate all inputs.
+* **Secure Coding:** Adhere to secure coding guidelines.
+* **Secrets Management:** Use a secrets management service like Google Cloud Secret Manager or HashiCorp Vault in production for storing API keys, JWT secrets, and encryption keys.
+* **Security Audits:** Regularly perform security audits and penetration testing.
+
 
 ## Future Enhancements
 
-* **HSM Integration:** Integrate with a Hardware Security Module (HSM) for more robust key management.
-* **MPC Implementation:** Implement Multi-Party Computation (MPC) for enhanced key security.
-* **More Sophisticated Frontend Integration:** Include frontend libraries/SDKs for easier integration.
+* **HSM Integration:** Improve key management security.
+* **MPC Implementation:** Enhanced key security.
+* **Frontend SDK:**  Simplified frontend integration.
 
-This updated README provides a more comprehensive overview of the secure headless wallet framework, its architecture, security features, API endpoints, and development/deployment considerations.  It highlights the key security aspects of the framework and emphasizes best practices for secure wallet management.
